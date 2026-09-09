@@ -4,18 +4,25 @@ Turns a job description + a company URL into a structured, editable interview
 preparation kit: a company brief, a role breakdown, a categorised question
 bank, flashcards, and a day-by-day study schedule.
 
+## Live deployment
+
+- **App**: http://140.245.244.19:8080/
+- **API docs (Swagger UI)**: http://140.245.244.19:8080/api/docs/
+- **OpenAPI spec (JSON)**: http://140.245.244.19:8080/api/docs.json
+
 ## Tech stack
 
 | Layer | Choice |
 |---|---|
-| Frontend | Next.js 16 (App Router) + Tailwind CSS 4 |
-| Backend | Node.js + Express, TypeScript |
+| Frontend | Next.js 16 (App Router) + Tailwind CSS 4, JavaScript |
+| Backend | Node.js + Express, JavaScript |
 | Database | MongoDB (Mongoose) |
 | LLM | Google Gemini (`gemini-3.6-flash`), via `@google/generative-ai` |
 | Search | Tavily (public interview-discussion search) |
 | Scraping | `fetch` + `cheerio`, hand-rolled crawler and robots.txt parser |
 | Auth | Session cookie signed with a JWT, `bcryptjs` for password hashing |
 | Tests | Vitest |
+| API docs | Swagger UI / OpenAPI 3, generated from JSDoc annotations on the routes |
 
 This matches the brief's preferred stack, so no substitution needed. LLM
 provider: **Gemini** was chosen over other free-tier options because its
@@ -45,22 +52,37 @@ apps/
    point at `http://localhost:4000`).
 4. Run the backend: `npm run dev:api` (listens on port 4000).
 5. Run the frontend: `npm run dev:web` (listens on port 3000).
+6. API docs are served by the backend itself at `http://localhost:4000/api/docs/`
+   (Swagger UI) and `http://localhost:4000/api/docs.json` (raw OpenAPI spec) —
+   no separate setup needed.
 
 ## Setup — deployed
 
-- **Frontend**: deploy `apps/web` to Vercel. Set `NEXT_PUBLIC_API_URL` to
-  the deployed backend URL.
-- **Backend**: deploy `apps/api` to Render (or similar). Build command
-  `npm install && npm run build`, start command `npm start`. Set
-  `GEMINI_API_KEY`, `TAVILY_API_KEY`, `MONGODB_URI`, `JWT_SECRET`,
-  `CORS_ORIGIN` (the deployed frontend URL), and `NODE_ENV=production`.
-- **Database**: a free MongoDB Atlas M0 cluster, connection string in
-  `MONGODB_URI`.
+Both apps run on a single Ubuntu VM behind nginx, rather than split across
+Vercel/Render — simpler to operate for a box that already had no domain name,
+just a bare IP with one open port.
+
+- **nginx** listens on `:8080` and reverse-proxies by path: `/api/*` to the
+  Express API on `127.0.0.1:4000`, everything else to the Next.js app on
+  `127.0.0.1:3000`. This keeps frontend and backend same-origin, so the
+  session cookie works over plain HTTP without `SameSite=None`/`Secure`
+  (there's no TLS cert for a bare IP without a domain).
+- **Backend**: `apps/api`, run as a systemd service (`node src/index.js`, no
+  build step needed since it's plain JS). Env vars: `GEMINI_API_KEY`,
+  `TAVILY_API_KEY`, `MONGODB_URI`, `JWT_SECRET`, `CORS_ORIGIN`, `NODE_ENV`.
+- **Frontend**: `apps/web`, built once (`npm run build`) then run as a
+  systemd service (`next start -p 3000 -H 127.0.0.1`). `NEXT_PUBLIC_API_URL`
+  is baked in at build time, so it must be set before building.
+- **Database**: MongoDB Community Edition installed natively on the same VM
+  (`mongod`, systemd-managed) rather than Atlas, since the box had no
+  existing database and this avoids an external dependency.
+- Both `trao-api` and `trao-web` are `systemctl enable`d, so they come back
+  automatically on reboot.
 
 `NODE_ENV=production` matters beyond convention here: it switches the
 session cookie to `SameSite=None; Secure`, which is required once the
 frontend and backend are on different origins, and it makes the SSRF guard
-in `security/urlValidation.ts` reject private/loopback addresses (see
+in `security/urlValidation.js` reject private/loopback addresses (see
 Security below).
 
 ## Batch entry point (Section 9)
@@ -72,7 +94,7 @@ npm run evaluate -- --input <cases.json> --output <kits.json>
 ```
 
 This runs from the repo root and forwards through to
-`apps/api/src/cli/evaluate.ts`, which calls the exact same
+`apps/api/src/cli/evaluate.js`, which calls the exact same
 `generateKit()` pipeline the web app uses — not a parallel implementation.
 Credentials are read from `apps/api/.env` (documented in
 `apps/api/.env.example`); no other setup is needed.
@@ -99,7 +121,7 @@ apps/web  ── fetch (credentials: include) ──►  apps/api
                                                     │
                                      Express routes (auth, kits)
                                                     │
-                                        pipeline/orchestrator.ts
+                                        pipeline/orchestrator.js
                               (the single source of truth for kit generation,
                                used by both the API routes and the batch CLI)
                                                     │
@@ -112,19 +134,19 @@ apps/web  ── fetch (credentials: include) ──►  apps/api
                                                   checker)
 ```
 
-- **`retrieval/`** — `crawler.ts` (BFS crawl, keyword-ranked link
-  discovery), `pageCleaner.ts` (HTML → text via cheerio), `publicDiscussion.ts`
-  (Tavily), backed by `security/fetchSafe.ts` and `security/robots.ts`.
-- **`llm/`** — a single retry-wrapped Gemini client (`client.ts`) and one
+- **`retrieval/`** — `crawler.js` (BFS crawl, keyword-ranked link
+  discovery), `pageCleaner.js` (HTML → text via cheerio), `publicDiscussion.js`
+  (Tavily), backed by `security/fetchSafe.js` and `security/robots.js`.
+- **`llm/`** — a single retry-wrapped Gemini client (`client.js`) and one
   prompt module per pipeline step, each with distinct system instructions.
-- **`scheduling/`** — `coverage.ts` and `scheduler.ts`: pure functions, no
+- **`scheduling/`** — `coverage.js` and `scheduler.js`: pure functions, no
   LLM calls, unit-tested directly.
-- **`schema/kitSchema.ts`** — the Appendix A contract as a zod schema, plus
+- **`schema/kitSchema.js`** — the Appendix A contract as a zod schema, plus
   cross-reference validation (dangling `question_ids`, unknown
   `requirement_ids`, duplicate ids, `schedule.days.length !==
   days_available`).
-- **`pipeline/orchestrator.ts`** — sequences all of the above; see below.
-- **`state/kitState.ts`** — the generated/edited/pinned model (see Builder
+- **`pipeline/orchestrator.js`** — sequences all of the above; see below.
+- **`state/kitState.js`** — the generated/edited/pinned model (see Builder
   state below).
 
 ## Retrieval approach and sources used
@@ -141,10 +163,10 @@ Given only a company URL, the pipeline:
    request; a disallowed URL is skipped and recorded, not treated as fatal.
    A missing/unreachable `robots.txt` is treated as "allow" (the
    conventional default).
-4. Each fetch goes through `security/fetchSafe.ts`: SSRF-checked URL,
+4. Each fetch goes through `security/fetchSafe.js`: SSRF-checked URL,
    `http(s)`-only, restricted content-types, a 2MB cap, and a 10s timeout.
    Requests are spaced ~350ms apart.
-5. Independently, `publicDiscussion.ts` queries Tavily for
+5. Independently, `publicDiscussion.js` queries Tavily for
    `"<company> interview process questions experience"` — this covers
    Glassdoor/Blind/Reddit-style public discussion that a same-origin crawl
    would never reach.
@@ -154,7 +176,7 @@ Given only a company URL, the pipeline:
 
 ## Sequencing (Section 3 & 4)
 
-`pipeline/orchestrator.ts` runs these steps in order, each depending on the
+`pipeline/orchestrator.js` runs these steps in order, each depending on the
 previous step's actual output:
 
 1. **Extract requirements** from the pasted JD (no retrieval needed —
@@ -172,7 +194,7 @@ previous step's actual output:
    "system design", a dedicated system-design pass runs over the must-have
    technical requirements — this is the concrete case from the brief where
    what was found about the hiring process changes what gets generated.
-6. **Coverage check** (deterministic — `scheduling/coverage.ts`, no model
+6. **Coverage check** (deterministic — `scheduling/coverage.js`, no model
    call): any requirement with zero covering questions is a gap.
 7. **Close gaps**: regenerate questions scoped to only the gap
    requirements, then re-check. Capped at 3 passes total — in practice a
@@ -182,9 +204,9 @@ previous step's actual output:
    uncovered after 3 passes are reported honestly in `coverage` and in the
    kit's `warnings` rather than papered over.
 8. **Flashcards**, generated from the same requirement set.
-9. **Schedule allocation** (deterministic — `scheduling/scheduler.ts`, no
+9. **Schedule allocation** (deterministic — `scheduling/scheduler.js`, no
    model call): arithmetic day-bucketing, described below.
-10. **Structural validation** (`schema/kitSchema.ts`) before the kit is
+10. **Structural validation** (`schema/kitSchema.js`) before the kit is
     ever returned or saved — an invalid kit is a thrown error, not a
     silently-broken save.
 
@@ -197,7 +219,7 @@ the highest-scoring chunk, so harder/must-have material lands earlier, not
 the night before. If there are more days than questions, the extra trailing
 days get an empty "Review and consolidation" slot rather than being
 dropped, so `schedule.days.length` always equals `days_available` exactly
-(1-day and 60-day requests both handled — see `tests/scheduler.test.ts`).
+(1-day and 60-day requests both handled — see `tests/scheduler.test.js`).
 Minutes are computed from a difficulty→minutes table and are always
 integers, per the brief's "no floats" rule.
 
@@ -208,7 +230,7 @@ worth spelling out precisely. Each kit document stores a `meta` object as a
 **sibling** of the Appendix A `kit` object (never inside it, so the
 Appendix A structure itself is never polluted with extra fields):
 
-```ts
+```js
 {
   company_brief: { state: "generated" | "edited" },
   schedule:       { state: "generated" | "edited" },
@@ -260,27 +282,27 @@ interval-based scheduler is a natural extension (see Limitations).
 
 | Case | Handling |
 |---|---|
-| Invalid/404/timeout company URL | `security/urlValidation.ts` + `fetchSafe.ts` reject/report it; recorded as a warning, generation still proceeds with an honest, thin brief |
+| Invalid/404/timeout company URL | `security/urlValidation.js` + `fetchSafe.js` reject/report it; recorded as a warning, generation still proceeds with an honest, thin brief |
 | No hiring page found | `crawlCompanySite` returns `hiringPageUrl: undefined`; a warning is added; the brief says so rather than inventing a process |
 | Two-line JD | `extractRequirements` is instructed to extract only what's explicit; a short requirement list is a valid, expected output, flagged via a warning when very short |
 | No public discussion found | `searchPublicDiscussion` returns `found: false`; brief and questions proceed without it, again flagged |
-| Invalid/incomplete model JSON | `llm/client.ts` attempts a fenced-JSON recovery, then throws `LlmInvalidJsonError`; the batch CLI classifies this as `LLM_INVALID_JSON` and records the case as `failed` rather than crashing the run |
-| Rate limit / transient provider failure | `util/retry.ts` — exponential backoff with jitter, 4 retries on the LLM client, 2 on search |
+| Invalid/incomplete model JSON | `llm/client.js` attempts a fenced-JSON recovery, then throws `LlmInvalidJsonError`; the batch CLI classifies this as `LLM_INVALID_JSON` and records the case as `failed` rather than crashing the run |
+| Rate limit / transient provider failure | `util/retry.js` — exponential backoff with jitter, 4 retries on the LLM client, 2 on search |
 | Duplicate submission (same JD + company) | `Kit.makeDedupeKey` + a lookup before creating — a second identical submission returns the existing in-flight/ready kit instead of starting a duplicate generation |
 | 1-day / 60-day schedule | `buildSchedule` always emits exactly `daysAvailable` days (see tests) |
 
 ## Security (Section 11)
 
-- `security/urlValidation.ts`: rejects non-`http(s)` schemes always;
+- `security/urlValidation.js`: rejects non-`http(s)` schemes always;
   resolves hostnames via DNS and rejects private/loopback/link-local
   ranges **unless** `allowPrivateNetworks` is explicitly set (only true for
   the batch CLI, per Appendix B's local-fixture requirement — the public
   API server never sets it).
-- `security/fetchSafe.ts`: content-type allowlist, 2MB body cap enforced
+- `security/fetchSafe.js`: content-type allowlist, 2MB body cap enforced
   even if `Content-Length` is absent/wrong, 10s timeout.
-- `security/robots.ts`: robots.txt is fetched and honored per host.
+- `security/robots.js`: robots.txt is fetched and honored per host.
 - **Prompt injection**: every prompt that includes fetched-page or
-  pasted-JD text wraps it via `llm/client.ts#wrapUntrustedContent`, which
+  pasted-JD text wraps it via `llm/client.js#wrapUntrustedContent`, which
   fences it and explicitly instructs the model to treat it as data, never
   as instructions — both the system prompt and the fence reiterate this,
   since a scraped page or a pasted JD is attacker-controllable text the
