@@ -61,6 +61,44 @@ async function runGeneration(kitId) {
   await doc.save();
 }
 
+/**
+ * @openapi
+ * /api/kits:
+ *   post:
+ *     summary: Create a kit and start generation
+ *     description: Returns immediately with status "pending"; generation runs in the background. Poll GET /api/kits/{id} for progress.
+ *     tags: [Kits]
+ *     security: [{ sessionCookie: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [jd, companyUrl, days]
+ *             properties:
+ *               jd: { type: string, description: "The pasted job description" }
+ *               companyUrl: { type: string, format: uri }
+ *               days: { type: integer, minimum: 1, maximum: 90 }
+ *     responses:
+ *       202: { description: Generation started }
+ *       200: { description: An identical in-flight/ready kit already exists (duplicate submission) }
+ *       400: { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ *       401: { description: Not signed in }
+ *   get:
+ *     summary: List the current user's kits
+ *     tags: [Kits]
+ *     security: [{ sessionCookie: [] }]
+ *     responses:
+ *       200:
+ *         description: Kit summaries, newest first
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 kits: { type: array, items: { $ref: '#/components/schemas/KitDocSummary' } }
+ */
 router.post("/", async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -87,6 +125,47 @@ router.post("/", async (req, res) => {
   res.status(202).json({ id: doc._id, status: "pending" });
 });
 
+/**
+ * @openapi
+ * /api/kits/batch:
+ *   post:
+ *     summary: Create multiple kits at once (multi-role upload)
+ *     tags: [Kits]
+ *     security: [{ sessionCookie: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [cases]
+ *             properties:
+ *               cases:
+ *                 type: array
+ *                 minItems: 1
+ *                 maxItems: 25
+ *                 items:
+ *                   type: object
+ *                   required: [jd, companyUrl, days]
+ *                   properties:
+ *                     jd: { type: string }
+ *                     companyUrl: { type: string, format: uri }
+ *                     days: { type: integer, minimum: 1, maximum: 90 }
+ *     responses:
+ *       202:
+ *         description: One entry per case, in the order submitted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 kits:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties: { id: { type: string }, status: { type: string } }
+ *       400: { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ */
 router.post("/batch", async (req, res) => {
   const parsed = batchSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -133,6 +212,32 @@ async function loadOwned(id, userId) {
   return doc;
 }
 
+/**
+ * @openapi
+ * /api/kits/{id}:
+ *   get:
+ *     summary: Get one kit (full detail, including generation status)
+ *     tags: [Kits]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: The kit document
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/KitDocFull' }
+ *       404: { description: Not found (or not owned by the caller), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ *   delete:
+ *     summary: Delete a kit
+ *     tags: [Kits]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       204: { description: Deleted }
+ *       404: { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ */
 router.get("/:id", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   if (!doc) {
@@ -199,6 +304,33 @@ async function persist(doc, kit, meta) {
 
 const briefEditSchema = z.object({ summary: z.string().optional(), what_they_do: z.string().optional() });
 
+/**
+ * @openapi
+ * /api/kits/{id}/brief:
+ *   patch:
+ *     summary: Edit the company brief inline
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               summary: { type: string }
+ *               what_they_do: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit not found or not ready }
+ */
 router.patch("/:id/brief", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -230,6 +362,38 @@ const questionCreateSchema = z.object({
   difficulty: z.number().int().min(1).max(3),
 });
 
+/**
+ * @openapi
+ * /api/kits/{id}/questions:
+ *   post:
+ *     summary: Add a hand-authored question (always pinned)
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [category, prompt, difficulty]
+ *             properties:
+ *               requirement_ids: { type: array, items: { type: string } }
+ *               category: { type: string, enum: [technical, behavioural, system-design, company-fit] }
+ *               prompt: { type: string }
+ *               answer_outline: { type: string }
+ *               difficulty: { type: integer, minimum: 1, maximum: 3 }
+ *     responses:
+ *       201:
+ *         description: Question added
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit not found or not ready }
+ */
 router.post("/:id/questions", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -265,6 +429,53 @@ const questionEditSchema = z.object({
   requirement_ids: z.array(z.string()).optional(),
 });
 
+/**
+ * @openapi
+ * /api/kits/{id}/questions/{qid}:
+ *   patch:
+ *     summary: Edit a question inline (marks it "edited", protecting it from category regeneration)
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: path, name: qid, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               prompt: { type: string }
+ *               answer_outline: { type: string }
+ *               difficulty: { type: integer, minimum: 1, maximum: 3 }
+ *               category: { type: string, enum: [technical, behavioural, system-design, company-fit] }
+ *               requirement_ids: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit or question not found }
+ *   delete:
+ *     summary: Delete a question
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: path, name: qid, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta (coverage and schedule recomputed)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit not found or not ready }
+ */
 router.patch("/:id/questions/:qid", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -311,6 +522,38 @@ router.delete("/:id/questions/:qid", async (req, res) => {
 
 const reorderSchema = z.object({ ids: z.array(z.string()).min(1) });
 
+/**
+ * @openapi
+ * /api/kits/{id}/questions/order:
+ *   put:
+ *     summary: Reorder questions (and/or move between categories via the category field on each question first)
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids]
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items: { type: string }
+ *                 description: Every existing question id, in the desired order, exactly once.
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       400: { description: ids must include every existing question exactly once }
+ *       404: { description: Kit not found or not ready }
+ */
 router.put("/:id/questions/order", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -343,6 +586,36 @@ const flashcardCreateSchema = z.object({
   requirement_ids: z.array(z.string()).default([]),
 });
 
+/**
+ * @openapi
+ * /api/kits/{id}/flashcards:
+ *   post:
+ *     summary: Add a hand-authored flashcard (always pinned)
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [front, back]
+ *             properties:
+ *               front: { type: string }
+ *               back: { type: string }
+ *               requirement_ids: { type: array, items: { type: string } }
+ *     responses:
+ *       201:
+ *         description: Flashcard added
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit not found or not ready }
+ */
 router.post("/:id/flashcards", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -372,6 +645,51 @@ const flashcardEditSchema = z.object({
   requirement_ids: z.array(z.string()).optional(),
 });
 
+/**
+ * @openapi
+ * /api/kits/{id}/flashcards/{fid}:
+ *   patch:
+ *     summary: Edit a flashcard inline (marks it "edited")
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: path, name: fid, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               front: { type: string }
+ *               back: { type: string }
+ *               requirement_ids: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit or flashcard not found }
+ *   delete:
+ *     summary: Delete a flashcard
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: path, name: fid, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit not found or not ready }
+ */
 router.patch("/:id/flashcards/:fid", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -412,6 +730,26 @@ router.delete("/:id/flashcards/:fid", async (req, res) => {
 
 // ---- Pin (protect an item from future category regeneration without editing it) ----
 
+/**
+ * @openapi
+ * /api/kits/{id}/questions/{qid}/pin:
+ *   post:
+ *     summary: Pin a still-generated question, protecting it from regeneration without editing it
+ *     tags: [Builder]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: path, name: qid, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       404: { description: Kit not found or not ready }
+ */
 router.post("/:id/questions/:qid/pin", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -431,6 +769,44 @@ const regenerateSchema = z.object({
   section: z.enum(["company_brief", "schedule", "technical", "behavioural", "system-design", "company-fit"]),
 });
 
+/**
+ * @openapi
+ * /api/kits/{id}/regenerate:
+ *   post:
+ *     summary: Regenerate one section of the kit
+ *     description: >
+ *       "company_brief" and "schedule" are regenerated wholesale. A question
+ *       category (technical, behavioural, system-design, company-fit) only
+ *       replaces items in that category still in the "generated" state —
+ *       anything "edited" or "pinned" survives untouched, and coverage +
+ *       schedule are recomputed afterward.
+ *     tags: [Regenerate]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [section]
+ *             properties:
+ *               section:
+ *                 type: string
+ *                 enum: [company_brief, schedule, technical, behavioural, system-design, company-fit]
+ *     responses:
+ *       200:
+ *         description: Updated kit and meta
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { kit: { $ref: '#/components/schemas/Kit' }, meta: { $ref: '#/components/schemas/KitMeta' } }
+ *       400: { description: Invalid section }
+ *       404: { description: Kit not found or not ready }
+ *       502: { description: Regeneration failed (LLM/provider error), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ */
 router.post("/:id/regenerate", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);
@@ -530,6 +906,30 @@ router.post("/:id/regenerate", async (req, res) => {
 
 const practiceSchema = z.object({ confidence: z.number().int().min(1).max(5) });
 
+/**
+ * @openapi
+ * /api/kits/{id}/practice/{cardId}:
+ *   post:
+ *     summary: Record how confident the user felt on a flashcard
+ *     tags: [Practice]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *       - { in: path, name: cardId, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [confidence]
+ *             properties:
+ *               confidence: { type: integer, minimum: 1, maximum: 5 }
+ *     responses:
+ *       200:
+ *         description: The full practice confidence log, keyed by flashcard id
+ *       404: { description: Kit not found }
+ */
 router.post("/:id/practice/:cardId", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   if (!doc) {
@@ -553,6 +953,29 @@ router.post("/:id/practice/:cardId", async (req, res) => {
 // seen sort first (treated as maximum uncertainty), then lowest recorded
 // confidence first. See README for why this over a full spaced-repetition
 // interval scheduler.
+/**
+ * @openapi
+ * /api/kits/{id}/practice/next:
+ *   get:
+ *     summary: Get the next practice session's card order
+ *     description: Confidence-weighted ascending order — never-seen cards sort first, then lowest recorded confidence first.
+ *     tags: [Practice]
+ *     security: [{ sessionCookie: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Ordered flashcard ids plus coverage counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 order: { type: array, items: { type: string } }
+ *                 covered: { type: integer }
+ *                 total: { type: integer }
+ *       404: { description: Kit not found or not ready }
+ */
 router.get("/:id/practice/next", async (req, res) => {
   const doc = await loadOwned(req.params.id, req.userId);
   const kit = requireReadyKit(doc);

@@ -24,6 +24,33 @@ const cookieOptions = {
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
+/**
+ * @openapi
+ * /api/auth/register:
+ *   post:
+ *     summary: Create an account
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string, minLength: 8 }
+ *     responses:
+ *       201:
+ *         description: Account created, session cookie set
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { user: { $ref: '#/components/schemas/User' } }
+ *       400: { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ *       409: { description: Email already registered, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ */
 router.post("/register", async (req, res) => {
   const parsed = credentialsSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -47,6 +74,32 @@ router.post("/register", async (req, res) => {
   res.status(201).json({ user: { id: user._id, email: user.email } });
 });
 
+/**
+ * @openapi
+ * /api/auth/login:
+ *   post:
+ *     summary: Log in
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string }
+ *     responses:
+ *       200:
+ *         description: Session cookie set
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { user: { $ref: '#/components/schemas/User' } }
+ *       401: { description: Invalid credentials, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ */
 router.post("/login", async (req, res) => {
   const parsed = credentialsSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -66,11 +119,37 @@ router.post("/login", async (req, res) => {
   res.json({ user: { id: user._id, email: user.email } });
 });
 
+/**
+ * @openapi
+ * /api/auth/logout:
+ *   post:
+ *     summary: Log out
+ *     tags: [Auth]
+ *     responses:
+ *       204: { description: Session cookie cleared }
+ */
 router.post("/logout", (_req, res) => {
   res.clearCookie(COOKIE_NAME);
   res.status(204).send();
 });
 
+/**
+ * @openapi
+ * /api/auth/me:
+ *   get:
+ *     summary: Get the current session's user
+ *     tags: [Auth]
+ *     security: [{ sessionCookie: [] }]
+ *     responses:
+ *       200:
+ *         description: Current user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties: { user: { $ref: '#/components/schemas/User' } }
+ *       401: { description: Not signed in, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ */
 router.get("/me", requireAuth, async (req, res) => {
   const user = await User.findById(req.userId);
   if (!user) {
