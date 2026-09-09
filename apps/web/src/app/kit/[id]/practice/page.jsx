@@ -52,6 +52,16 @@ function PracticeContent({ id }) {
     if (index + 1 >= order.length) {
       await loadOrder();
     } else {
+      // Refresh the coverage counter right away so progress reflects this
+      // answer immediately, without reshuffling the fixed order mid-round
+      // (a full re-sort only happens at the start of the next round).
+      try {
+        const next = await api.nextPractice(id);
+        setCovered(next.covered);
+        setTotal(next.total);
+      } catch {
+        // Non-fatal — counter just stays stale until the next successful fetch.
+      }
       setIndex((i) => i + 1);
       setRevealed(false);
     }

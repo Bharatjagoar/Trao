@@ -1,0 +1,15 @@
+[Unit]
+Description=Trao Interview Kit API
+After=network.target mongod.service
+Wants=mongod.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trao/apps/api
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

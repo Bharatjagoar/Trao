@@ -1,0 +1,14 @@
+[Unit]
+Description=Trao Interview Kit Web
+After=network.target trao-api.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trao/apps/web
+ExecStart=/usr/bin/npm run start -- -p 3000 -H 127.0.0.1
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
