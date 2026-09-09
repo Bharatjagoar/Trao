@@ -1,0 +1,19 @@
+{
+  "name": "ai-interview-prep-kit",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=apps/api && npm run build --workspace=apps/web",
+    "test": "npm run test --workspace=apps/api",
+    "evaluate": "npm run evaluate --workspace=apps/api --"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
