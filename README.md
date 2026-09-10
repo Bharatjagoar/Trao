@@ -17,7 +17,7 @@ bank, flashcards, and a day-by-day study schedule.
 | Frontend | Next.js 16 (App Router) + Tailwind CSS 4, JavaScript |
 | Backend | Node.js + Express, JavaScript |
 | Database | MongoDB (Mongoose) |
-| LLM | Google Gemini (`gemini-3.6-flash`), via `@google/generative-ai` |
+| LLM | Google Gemini (`gemini-3.5-flash-lite`), via `@google/generative-ai` |
 | Search | Tavily (public interview-discussion search) |
 | Scraping | `fetch` + `cheerio`, hand-rolled crawler and robots.txt parser |
 | Auth | Session cookie signed with a JWT, `bcryptjs` for password hashing |
@@ -26,8 +26,16 @@ bank, flashcards, and a day-by-day study schedule.
 
 This matches the brief's preferred stack, so no substitution needed. LLM
 provider: **Gemini** was chosen over other free-tier options because its
-JSON mode (`responseMimeType: "application/json"`) is reliable, and its
-free tier's tokens-per-minute limit is workable for a multi-call pipeline.
+JSON mode (`responseMimeType: "application/json"`) is reliable. Model:
+**`gemini-3.5-flash-lite`** specifically, over the full-size flash models —
+on the free tier, every non-Lite Gemini flash model (2.5, 3, 3.5, 3.6, 3.7,
+3.8 Flash) is capped at just 20 requests/day, while the Lite variants get
+500/day at a higher RPM too. A single kit generation makes 6-9 Gemini calls
+(extraction, brief, per-category questions, gap-fill, flashcards), so the
+20 RPD tier allows only ~2 kit generations a day before every request fails
+with `RATE_LIMITED` — nowhere near enough to run the batch CLI's 5-case
+evaluation, let alone everyday use. The Lite tier's 500 RPD comfortably
+covers that.
 Search provider: **Tavily** was chosen because it's built for LLM pipelines
 (returns clean, pre-summarized results rather than raw SERPs) and has a
 1,000-query/month free tier with no card required.
@@ -84,6 +92,31 @@ session cookie to `SameSite=None; Secure`, which is required once the
 frontend and backend are on different origins, and it makes the SSRF guard
 in `security/urlValidation.js` reject private/loopback addresses (see
 Security below).
+
+## Environment variables
+
+Each app has its own `.env.example` documenting exactly what it needs —
+`apps/api/.env.example` and `apps/web/.env.example`. Copy each to `.env`
+(`.env.local` for the web app) and fill in the values.
+
+**`apps/api/.env`**
+
+| Variable | Purpose |
+|---|---|
+| `GEMINI_API_KEY` | Google AI Studio key for the Gemini LLM calls |
+| `GEMINI_MODEL` | Gemini model id (`gemini-3.5-flash-lite`) |
+| `TAVILY_API_KEY` | Tavily key for public interview-discussion search |
+| `MONGODB_URI` | MongoDB connection string (local `mongod` or Atlas) |
+| `JWT_SECRET` | Signs session JWTs — any long random string |
+| `PORT` | Port the Express API listens on |
+| `CORS_ORIGIN` | Origin allowed to make credentialed requests (the frontend URL) |
+| `NODE_ENV` | `development`/`production` — see note below |
+
+**`apps/web/.env.local`**
+
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | Base URL of the Express API, baked in at build time |
 
 ## Batch entry point (Section 9)
 
@@ -290,6 +323,21 @@ interval-based scheduler is a natural extension (see Limitations).
 | Rate limit / transient provider failure | `util/retry.js` — exponential backoff with jitter, 4 retries on the LLM client, 2 on search |
 | Duplicate submission (same JD + company) | `Kit.makeDedupeKey` + a lookup before creating — a second identical submission returns the existing in-flight/ready kit instead of starting a duplicate generation |
 | 1-day / 60-day schedule | `buildSchedule` always emits exactly `daysAvailable` days (see tests) |
+
+**Rate limits, in detail.** Free-tier providers throttle tokens-per-minute,
+not just requests-per-minute, so a single content-heavy call can trip the
+limit even with few requests — a pipeline that dies on the first 429 is the
+most common way to lose points here. `llm/client.js#generateJson` catches
+Gemini errors, classifies a `429`/`rate limit`/`quota` message as
+`RATE_LIMITED` and a `503`/`overloaded` one as `MODEL_OVERLOADED`, and routes
+only those two into `withRetry`. `withRetry` retries up to 4 times with a
+delay of `2000ms * 2^attempt` plus up to 250ms of jitter (~2s, 4s, 8s, 16s),
+so a rate-limited call backs off and retries instead of failing the kit
+outright. Any other error (a real bug, not a transient provider hiccup) is
+not retried. If all 4 retries are exhausted, the error propagates up and
+that one case is recorded as `failed` — in the batch CLI per Appendix B, or
+as a generation failure in the app — rather than the whole run/request
+crashing.
 
 ## Security (Section 11)
 
