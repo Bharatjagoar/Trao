@@ -6,9 +6,6 @@ bank, flashcards, and a day-by-day study schedule.
 
 ## Live deployment
 
-> The hosted instance has not yet been redeployed with the LangChain + Groq
-> version in this repository; it runs the earlier build.
-
 - **App**: http://140.245.244.19:8080/
 - **API docs (Swagger UI)**: http://140.245.244.19:8080/api/docs/
 - **OpenAPI spec (JSON)**: http://140.245.244.19:8080/api/docs.json
