@@ -6,6 +6,9 @@ bank, flashcards, and a day-by-day study schedule.
 
 ## Live deployment
 
+> The hosted instance has not yet been redeployed with the LangChain + Groq
+> version in this repository; it runs the earlier build.
+
 - **App**: http://140.245.244.19:8080/
 - **API docs (Swagger UI)**: http://140.245.244.19:8080/api/docs/
 - **OpenAPI spec (JSON)**: http://140.245.244.19:8080/api/docs.json
@@ -17,7 +20,7 @@ bank, flashcards, and a day-by-day study schedule.
 | Frontend | Next.js 16 (App Router) + Tailwind CSS 4, JavaScript |
 | Backend | Node.js + Express, JavaScript |
 | Database | MongoDB (Mongoose) |
-| LLM | Google Gemini (`gemini-3.5-flash-lite`), via `@google/generative-ai` |
+| LLM | Groq (`openai/gpt-oss-120b`), orchestrated with LangChain (`@langchain/core`, `@langchain/groq`) |
 | Search | Tavily (public interview-discussion search) |
 | Scraping | `fetch` + `cheerio`, hand-rolled crawler and robots.txt parser |
 | Auth | Session cookie signed with a JWT, `bcryptjs` for password hashing |
@@ -25,17 +28,24 @@ bank, flashcards, and a day-by-day study schedule.
 | API docs | Swagger UI / OpenAPI 3, generated from JSDoc annotations on the routes |
 
 This matches the brief's preferred stack, so no substitution needed. LLM
-provider: **Gemini** was chosen over other free-tier options because its
-JSON mode (`responseMimeType: "application/json"`) is reliable. Model:
-**`gemini-3.5-flash-lite`** specifically, over the full-size flash models —
-on the free tier, every non-Lite Gemini flash model (2.5, 3, 3.5, 3.6, 3.7,
-3.8 Flash) is capped at just 20 requests/day, while the Lite variants get
-500/day at a higher RPM too. A single kit generation makes 6-9 Gemini calls
-(extraction, brief, per-category questions, gap-fill, flashcards), so the
-20 RPD tier allows only ~2 kit generations a day before every request fails
-with `RATE_LIMITED` — nowhere near enough to run the batch CLI's 5-case
-evaluation, let alone everyday use. The Lite tier's 500 RPD comfortably
-covers that.
+provider: **Groq**, for its fast inference and free tier, with
+**`openai/gpt-oss-120b`** as the default model (override with `GROQ_MODEL`).
+It supports schema-enforced JSON output, which LangChain's
+`withStructuredOutput` uses to bind each step to a zod schema. The trade-off
+is a tight free-tier budget of 8,000 tokens per minute, so a kit generation
+spends part of its time waiting for that window (see Rate limits below).
+
+## LangChain workflows
+
+- **One chain per LLM step** (`llm/client.js#createStructuredChain`):
+  `ChatPromptTemplate → ChatGroq → structured output (zod)`. The chains are
+  requirement extraction, company brief, flashcards, and a separate question
+  chain per category (technical, behavioural, system-design, company-fit).
+- **One pipeline** (`pipeline/orchestrator.js`): a `RunnableSequence` of
+  named steps (extract → research → brief → questions → coverage →
+  flashcards → assemble), each receiving the accumulated state. Control flow
+  is fixed in code; there are no agents.
+
 Search provider: **Tavily** was chosen because it's built for LLM pipelines
 (returns clean, pre-summarized results rather than raw SERPs) and has a
 1,000-query/month free tier with no card required.
@@ -52,7 +62,7 @@ apps/
 
 1. `npm install` from the repo root (installs both workspaces).
 2. Copy `apps/api/.env.example` to `apps/api/.env` and fill in:
-   - `GEMINI_API_KEY` — from [aistudio.google.com](https://aistudio.google.com)
+   - `GROQ_API_KEY` — from [console.groq.com](https://console.groq.com)
    - `TAVILY_API_KEY` — from [tavily.com](https://tavily.com)
    - `MONGODB_URI` — a local `mongod`, or a free MongoDB Atlas M0 cluster
    - `JWT_SECRET` — any long random string
@@ -76,7 +86,7 @@ just a bare IP with one open port.
   session cookie works over plain HTTP without `SameSite=None`/`Secure`
   (there's no TLS cert for a bare IP without a domain).
 - **Backend**: `apps/api`, run as a systemd service (`node src/index.js`, no
-  build step needed since it's plain JS). Env vars: `GEMINI_API_KEY`,
+  build step needed since it's plain JS). Env vars: `GROQ_API_KEY`,
   `TAVILY_API_KEY`, `MONGODB_URI`, `JWT_SECRET`, `CORS_ORIGIN`, `NODE_ENV`.
 - **Frontend**: `apps/web`, built once (`npm run build`) then run as a
   systemd service (`next start -p 3000 -H 127.0.0.1`). `NEXT_PUBLIC_API_URL`
@@ -103,8 +113,8 @@ Each app has its own `.env.example` documenting exactly what it needs —
 
 | Variable | Purpose |
 |---|---|
-| `GEMINI_API_KEY` | Google AI Studio key for the Gemini LLM calls |
-| `GEMINI_MODEL` | Gemini model id (`gemini-3.5-flash-lite`) |
+| `GROQ_API_KEY` | Groq key for the LLM calls |
+| `GROQ_MODEL` | Groq model id (defaults to `openai/gpt-oss-120b`) |
 | `TAVILY_API_KEY` | Tavily key for public interview-discussion search |
 | `MONGODB_URI` | MongoDB connection string (local `mongod` or Atlas) |
 | `JWT_SECRET` | Signs session JWTs — any long random string |
@@ -161,7 +171,7 @@ apps/web  ── fetch (credentials: include) ──►  apps/api
                     ┌───────────────┬───────────────┼───────────────┐
                     │               │               │               │
               retrieval/*      llm/prompts/*   scheduling/*      schema/*
-           (crawler, robots,   (Gemini calls,  (deterministic    (zod, the
+           (crawler, robots,   (LangChain,     (deterministic    (zod, the
             fetch, search)      per-step        day allocator     Appendix A
                                  prompts)        + coverage        contract)
                                                   checker)
@@ -170,7 +180,7 @@ apps/web  ── fetch (credentials: include) ──►  apps/api
 - **`retrieval/`** — `crawler.js` (BFS crawl, keyword-ranked link
   discovery), `pageCleaner.js` (HTML → text via cheerio), `publicDiscussion.js`
   (Tavily), backed by `security/fetchSafe.js` and `security/robots.js`.
-- **`llm/`** — a single retry-wrapped Gemini client (`client.js`) and one
+- **`llm/`** — a retry-wrapped LangChain chain factory (`client.js`) and one
   prompt module per pipeline step, each with distinct system instructions.
 - **`scheduling/`** — `coverage.js` and `scheduler.js`: pure functions, no
   LLM calls, unit-tested directly.
@@ -178,7 +188,7 @@ apps/web  ── fetch (credentials: include) ──►  apps/api
   cross-reference validation (dangling `question_ids`, unknown
   `requirement_ids`, duplicate ids, `schedule.days.length !==
   days_available`).
-- **`pipeline/orchestrator.js`** — sequences all of the above; see below.
+- **`pipeline/orchestrator.js`** — a LangChain `RunnableSequence` over all of the above; see below.
 - **`state/kitState.js`** — the generated/edited/pinned model (see Builder
   state below).
 
@@ -221,7 +231,7 @@ previous step's actual output:
    about/hiring text *and* the public-discussion summary, so it only runs
    after both retrieval steps.
 5. **Generate questions**, grouped by requirement *kind* (technical /
-   behavioural / domain), one Gemini call per kind with category-specific
+   behavioural / domain), one LLM call per kind with category-specific
    instructions — a "5+ years React" requirement and a "mentors juniors"
    requirement never share a prompt. If the hiring-process text mentions
    "system design", a dedicated system-design pass runs over the must-have
@@ -319,24 +329,23 @@ interval-based scheduler is a natural extension (see Limitations).
 | No hiring page found | `crawlCompanySite` returns `hiringPageUrl: undefined`; a warning is added; the brief says so rather than inventing a process |
 | Two-line JD | `extractRequirements` is instructed to extract only what's explicit; a short requirement list is a valid, expected output, flagged via a warning when very short |
 | No public discussion found | `searchPublicDiscussion` returns `found: false`; brief and questions proceed without it, again flagged |
-| Invalid/incomplete model JSON | `llm/client.js` attempts a fenced-JSON recovery, then throws `LlmInvalidJsonError`; the batch CLI classifies this as `LLM_INVALID_JSON` and records the case as `failed` rather than crashing the run |
-| Rate limit / transient provider failure | `util/retry.js` — exponential backoff with jitter, 4 retries on the LLM client, 2 on search |
+| Invalid/incomplete model JSON | Output is schema-enforced; a rejected response is retried, then raises `LlmInvalidJsonError`; the batch CLI classifies this as `LLM_INVALID_JSON` and records the case as `failed` rather than crashing the run |
+| Rate limit / transient provider failure | `util/retry.js` — exponential backoff with jitter, 5 retries on the LLM client, 2 on search |
 | Duplicate submission (same JD + company) | `Kit.makeDedupeKey` + a lookup before creating — a second identical submission returns the existing in-flight/ready kit instead of starting a duplicate generation |
 | 1-day / 60-day schedule | `buildSchedule` always emits exactly `daysAvailable` days (see tests) |
 
 **Rate limits, in detail.** Free-tier providers throttle tokens-per-minute,
 not just requests-per-minute, so a single content-heavy call can trip the
 limit even with few requests — a pipeline that dies on the first 429 is the
-most common way to lose points here. `llm/client.js#generateJson` catches
-Gemini errors, classifies a `429`/`rate limit`/`quota` message as
-`RATE_LIMITED` and a `503`/`overloaded` one as `MODEL_OVERLOADED`, and routes
-only those two into `withRetry`. `withRetry` retries up to 4 times with a
-delay of `2000ms * 2^attempt` plus up to 250ms of jitter (~2s, 4s, 8s, 16s),
-so a rate-limited call backs off and retries instead of failing the kit
-outright. Any other error (a real bug, not a transient provider hiccup) is
-not retried. If all 4 retries are exhausted, the error propagates up and
-that one case is recorded as `failed` — in the batch CLI per Appendix B, or
-as a generation failure in the app — rather than the whole run/request
+most common way to lose points here. The chain wrapper in `llm/client.js`
+classifies a `429` as `RATE_LIMITED` and a `503`/overloaded error as
+`MODEL_OVERLOADED`, and retries those (and rejected JSON) through
+`withRetry`: up to 5 times, waiting for Groq's `retry-after` period plus an
+exponential backoff (4s, 8s, 16s, ...). Crawled text is also clipped to 6,000
+characters per section so no single request exceeds the per-minute budget.
+Other errors are not retried. If all retries are exhausted, the error
+propagates up and that one case is recorded as `failed` — in the batch CLI
+per Appendix B, or as a generation failure in the app — rather than the whole run/request
 crashing.
 
 ## Security (Section 11)

@@ -1,3 +1,4 @@
+import { RunnableLambda, RunnableSequence } from "@langchain/core/runnables";
 import { validateKit } from "../schema/kitSchema.js";
 import { extractRequirements } from "../llm/prompts/extractRequirements.js";
 import { generateCompanyBrief } from "../llm/prompts/companyBrief.js";
@@ -20,12 +21,15 @@ const KIND_TO_CATEGORY = {
 /**
  * The full research -> generation -> validation pipeline, used identically
  * by the Express API and the batch CLI (Section 9 requires the same code
- * path, not a parallel implementation). Each step below responds to what
- * the previous step actually found rather than being one big prompt.
+ * path, not a parallel implementation). It is a LangChain RunnableSequence:
+ * each step receives the accumulated state and responds to what the previous
+ * step actually found rather than being one big prompt.
  */
 export async function generateKit(input) {
-  const warnings = [];
+  return kitWorkflow.invoke({ input, warnings: [] });
+}
 
+async function extractStep({ input, warnings }) {
   if (!input.jd || input.jd.trim().length < 10) {
     warnings.push("Job description is extremely short — extraction will be thin, not fabricated.");
   }
@@ -38,6 +42,12 @@ export async function generateKit(input) {
     kind: r.kind,
     priority: r.priority,
   }));
+
+  return { input, warnings, extracted, requirements };
+}
+
+async function researchStep(state) {
+  const { input, warnings } = state;
 
   // Step 2: research the company. A homepage needs crawling before it's useful.
   let pagesUsed = [];
@@ -78,6 +88,20 @@ export async function generateKit(input) {
     warnings.push("No public discussion of this company's interview process was found.");
   }
 
+  return {
+    ...state,
+    companyName,
+    aboutText,
+    hiringText,
+    hiringPageUrl,
+    pagesUsed,
+    discussion,
+  };
+}
+
+async function briefStep(state) {
+  const { companyName, aboutText, hiringText, discussion } = state;
+
   // Step 4: company brief — depends on steps 2 and 3 having run first.
   const brief = await generateCompanyBrief({
     companyName,
@@ -85,6 +109,12 @@ export async function generateKit(input) {
     hiringText,
     discussionSummary: discussion.summary,
   });
+
+  return { ...state, brief };
+}
+
+async function questionsStep(state) {
+  const { extracted, requirements, hiringText, discussion } = state;
 
   // What was found about the hiring process shapes what questions make
   // sense (e.g. a take-home + system-design round vs. nothing published).
@@ -112,6 +142,13 @@ export async function generateKit(input) {
     );
   }
 
+  return { ...state, hiringProcessNotes, questions };
+}
+
+async function coverageStep(state) {
+  const { warnings, extracted, requirements, hiringProcessNotes } = state;
+  let { questions } = state;
+
   // Step 6 (deterministic — not the model's decision): coverage check, then
   // act on the gaps and check again.
   let passes = 1;
@@ -137,6 +174,12 @@ export async function generateKit(input) {
     );
   }
 
+  return { ...state, questions, coverage: { uncovered_requirement_ids: uncovered, passes } };
+}
+
+async function flashcardsStep(state) {
+  const { requirements } = state;
+
   // Step 7: flashcards, from the same validated requirement set.
   const rawFlashcards = await generateFlashcards(requirements);
   const requirementIds = new Set(requirements.map((r) => r.id));
@@ -146,6 +189,27 @@ export async function generateKit(input) {
     back: f.back,
     requirement_ids: f.requirement_ids.filter((id) => requirementIds.has(id)),
   }));
+
+  return { ...state, flashcards };
+}
+
+function assembleStep(state) {
+  const {
+    input,
+    warnings,
+    extracted,
+    requirements,
+    companyName,
+    aboutText,
+    hiringText,
+    hiringPageUrl,
+    pagesUsed,
+    discussion,
+    brief,
+    questions,
+    flashcards,
+    coverage,
+  } = state;
 
   // Step 8 (deterministic): schedule allocation is arithmetic, done in code.
   const schedule = buildSchedule(requirements, questions, input.days);
@@ -174,7 +238,7 @@ export async function generateKit(input) {
     questions,
     flashcards,
     schedule,
-    coverage: { uncovered_requirement_ids: uncovered, passes },
+    coverage,
   };
 
   const validation = validateKit(kit);
@@ -193,6 +257,18 @@ export async function generateKit(input) {
 
   return { kit, warnings, research };
 }
+
+const step = (name, fn) => RunnableLambda.from(fn).withConfig({ runName: name });
+
+const kitWorkflow = RunnableSequence.from([
+  step("extract_requirements_step", extractStep),
+  step("research_company", researchStep),
+  step("write_company_brief", briefStep),
+  step("generate_questions", questionsStep),
+  step("close_coverage_gaps", coverageStep),
+  step("generate_flashcards_step", flashcardsStep),
+  step("assemble_and_validate", assembleStep),
+]).withConfig({ runName: "interview_kit_workflow" });
 
 async function generateQuestionsForKinds(requirements, roleTitle, hiringProcessNotes) {
   const byKind = new Map();

@@ -32,7 +32,7 @@ function classifyError(err) {
   if (/structural validation/i.test(message)) {
     return { code: "KIT_VALIDATION_FAILED", message };
   }
-  if (/GEMINI_API_KEY/.test(message)) {
+  if (/GROQ_API_KEY/.test(message)) {
     return { code: "LLM_NOT_CONFIGURED", message };
   }
   return { code: "UNKNOWN_ERROR", message };
